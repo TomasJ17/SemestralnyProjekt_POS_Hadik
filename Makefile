@@ -1,13 +1,11 @@
 CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O2
-LDFLAGS =
-LDLIBS =
 
 CLIENT_BIN = client/client
 SERVER_BIN = server/server
 
-CLIENT_SRC = client/main.c
-SERVER_SRC = server/main.c
+CLIENT_SRC = client/main.c ipc/ipc.c
+SERVER_SRC = server/main.c ipc/ipc.c
 
 .PHONY: all client server clean
 
