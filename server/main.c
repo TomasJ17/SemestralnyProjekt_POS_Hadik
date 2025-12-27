@@ -33,7 +33,7 @@ int main(void) {
 
     //handshake
     ipc_write_line(s2c, "READY");
-
+    //game loop
     while (1) {
       ssize_t n = ipc_read_line(c2s, line, sizeof(line));
       if(n <= 0){
@@ -53,6 +53,7 @@ int main(void) {
     
     close(c2s);
     close(s2c);
+    ipc_cleanup_fifos();
     printf("SERVER end\n");
     return 0;
 }
