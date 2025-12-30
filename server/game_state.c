@@ -1,4 +1,6 @@
-#include "game_state.h"
+#define _POSIX_C_SOURCE 200809L
+
+#include "../common/game_state.h"
 
 #include <stddef.h>
 #include <time.h>

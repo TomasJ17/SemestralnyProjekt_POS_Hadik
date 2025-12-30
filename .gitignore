@@ -60,3 +60,14 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+#Project binaries
+client/client
+server/server
+
+#vim/neovim
+*.swp
+*.swo
+*.swn
+*.swm
+*.tmp

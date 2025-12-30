@@ -5,8 +5,8 @@ CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O2
 CLIENT_BIN = client/client
 SERVER_BIN = server/server
 
-CLIENT_SRC = client/main.c ipc/ipc.c
-SERVER_SRC = server/main.c ipc/ipc.c
+CLIENT_SRC = client/main.c client/render.c ipc/ipc.c
+SERVER_SRC = server/main.c server/game_state.c ipc/ipc.c
 #in case of files named as this system targets
 .PHONY: all client server clean
 #default targets
