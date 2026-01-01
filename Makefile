@@ -1,6 +1,6 @@
 #with help of artificial intelligence chatgpt
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O2
+CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O2 -pthread
 
 CLIENT_BIN = client/client
 SERVER_BIN = server/server

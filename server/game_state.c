@@ -184,7 +184,8 @@ static void spawn_food(game_state_t *g){
   }
 
 void game_make_state_line(const game_state_t *g, char *out, size_t cap){
-  snprintf(out,
+  size_t used = 0;
+  int n = snprintf(out,
            cap,
             "STATE status=%d alive=%d score=%d time=%d/%d head=[%d,%d] food=[%d,%d]",g->status,
            g->alive,
@@ -196,4 +197,28 @@ void game_make_state_line(const game_state_t *g, char *out, size_t cap){
            g->food.x,
            g->food.y
            );
+  if(n < 0){
+    if(cap) out[0] = '\0';
+    return;
+  }
+  used = (size_t)n;
+  if(used >= cap){
+    out[cap - 1] = '\0';
+    return;
+  }
+
+  //append segments
+  for(size_t i = 0; i < g->snake_len; i++){
+    n = snprintf(out + used, cap - used, "%d,%d%s",
+        g->snake[i].x,
+        g->snake[i].y,
+        (i + 1 < g->snake_len) ? ";" : ""
+      );
+    if(n < 0) break;
+    used += (size_t)n;
+    if(used >= cap){
+      out[cap - 1] = '\0';
+      return;
+    }
+  }
 }
