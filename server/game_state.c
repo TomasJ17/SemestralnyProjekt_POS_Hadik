@@ -63,6 +63,14 @@ static point_t next_head(const game_state_t *g){
   return head;
 }
 
+static int is_blocked_cell(const game_state_t *g, point_t p){
+  if(g->world == WORLD_WALLS){
+    if(p.x < 0 || p.x >= g->width || p.y < 0 || p.y >= g->height) return 1;
+    if(g->obstacles[p.y][p.x]) return 1;
+  }
+  return 0;
+}
+
 static void spawn_food(game_state_t *g){
     point_t p;
     //pomocka keby bola mapa plna hada
@@ -72,7 +80,7 @@ static void spawn_food(game_state_t *g){
       p.x = rand() % g->width;
       p.y = rand() % g->height;
       max_tries--;
-    } while(snake_contains(g,p, g->snake_len) && max_tries > 0);
+    } while((snake_contains(g,p, g->snake_len) || is_blocked_cell(g, p)) && max_tries > 0);
     if(max_tries <= 0){
       g->status = GAME_OVER;
       g->alive = 0;
@@ -92,14 +100,14 @@ static void spawn_food(game_state_t *g){
     g->status = GAME_RUNNING;
     g->alive = 1;
     g->score = 0;
-    g->direction = DIR_RIGHT;
+    g->direction = DIR_UP;
     //pociatocna dlzka hada
     g->snake_len = 3;
     int sx = width/2;
     int sy = height/2;
     g->snake[0] = (point_t){sx,sy};
-    g->snake[1] = (point_t){sx-1,sy};
-    g->snake[2] = (point_t){sx-2,sy};
+    g->snake[1] = (point_t){sx,sy+1};
+    g->snake[2] = (point_t){sx,sy+2};
     
     //casovanie
     g->start_ms = now_ms();
@@ -145,6 +153,13 @@ static void spawn_food(game_state_t *g){
         return;
       }
     }
+  if(g->world == WORLD_WALLS){
+    if(g->obstacles[new_head.y][new_head.x]){
+      g->status = GAME_OVER;
+      g->alive = 0;
+      return;
+    }
+  }
   //ci zjedol jedlo a bude rast
   int will_grow = points_equal(new_head, g->food);
 
@@ -187,11 +202,13 @@ void game_make_state_line(const game_state_t *g, char *out, size_t cap){
   size_t used = 0;
   int n = snprintf(out,
            cap,
-            "STATE status=%d alive=%d score=%d time=%d/%d head=[%d,%d] food=[%d,%d]",g->status,
+            "STATE status=%d alive=%d score=%d time=%d/%d w=%d h=%d head=[%d,%d] food=[%d,%d]",g->status,
            g->alive,
            g->score,
            g->elapsed_ms,
            g->time_limit_ms,
+           g->width,
+           g->height,
            g->snake[0].x,
            g->snake[0].y,
            g->food.x,

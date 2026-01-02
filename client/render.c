@@ -34,6 +34,20 @@ void render_draw(FILE *out, const game_state_t *g){
     buf[i*row + 0] = '#';
     buf[i*row + (W + 1)] = '#';
   }
+  //prekazky WORLD WALLS
+  if(g->world == WORLD_WALLS){
+    for(int y = 0; y < H; y++){
+      for(int x = 0; x < W; x++){
+        if(y < MAP_H && x < MAP_W && g->obstacles[y][x]){
+          //nekresli okraj kresli sa vyssie
+          if(x == 0 || y == 0 || x == W-1 || y == H-1) continue;
+          int ox = x + 1;
+          int oy = y + 1;
+          buf[oy*row + ox] = '#';
+        }
+      }
+    }
+  }
   //jedlo
   if(g->food.x >= 0 && g->food.x < W && g->food.y >=0 && g->food.y < H){
     int ox = g->food.x + 1;
@@ -52,10 +66,20 @@ void render_draw(FILE *out, const game_state_t *g){
   }
   //HUD
   int used = rows * row;
-  int n = snprintf(buf + used, canvas_sz - used,
+  int n;
+  if(g->mode == MODE_TIME){  
+    n = snprintf(buf + used, canvas_sz - used,
                    "score=%d  status=%d time=%d/%d ms\n",
                    g->score, g->status, g->elapsed_ms, g->time_limit_ms
                    );
+  }else{
+    n = snprintf(buf + used, canvas_sz - used,
+                 "score=%d  status=%d\n",
+                  g->score, g->status
+                 );
+  }
+
+
   if(n < 0) n = 0;
   used += n;
 

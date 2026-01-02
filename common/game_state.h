@@ -32,12 +32,16 @@ typedef struct{
 }point_t;
 
 #define MAX_SNAKE_LEN 1024
+#define MAP_W 50
+#define MAP_H 30
 
 typedef struct{
   int width;
   int height;
   game_mode_t mode;
   world_type_t world;
+  //pole prekazok pre WORLD_WALLS
+  uint8_t obstacles[MAP_H][MAP_W]; //0/1
   game_status_t status;
   int alive;
   int score;
