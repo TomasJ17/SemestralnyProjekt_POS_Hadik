@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 #define MSG_READY "READY"
+#define MSG_START "START"
 #define MSG_QUIT  "QUIT"
 #define MSG_BYE   "BYE"
 #define MSG_INPUT "INPUT"

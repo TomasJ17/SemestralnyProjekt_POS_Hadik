@@ -18,6 +18,7 @@ typedef struct {
   int s2c_fd;   // server->client(write)
   int connected;// ci je klient pripojeny
   int shutdown; // ci sa ma skoncit server
+  int game_started;
   
   pthread_mutex_t lock;
   game_state_t game;
@@ -93,7 +94,7 @@ static void *tick_thread(void *arg){
     if(ctx->resume_delay_active && now >= ctx->resume_at_ms){
       ctx->resume_delay_active = 0;
     }
-
+  if(ctx->game_started){
   //update hry
   game_tick(&ctx->game, ctx->tick_ms);
   //standardny mode ak nikto nieje pripojeny 10s koniec hry
@@ -108,8 +109,9 @@ static void *tick_thread(void *arg){
   if(ctx->game.status == GAME_OVER || !ctx->game.alive){
       ctx->shutdown = 1;
     }
-  // ak klient pripojeny posli STATE
-  if(ctx->connected && ctx->s2c_fd >= 0){
+  }
+  // posielaj STATE len ked hra bezi
+  if(ctx->game_started && ctx->connected && ctx->s2c_fd >= 0){
       game_make_state_line(&ctx->game, out, sizeof(out));
       fd_to_write = ctx->s2c_fd;      
     }
@@ -150,6 +152,69 @@ static int parse_direction_from_input(const char *line, direction_t *out_dir){
   return 0;
 }
 
+static const char *find_after(const char*s, const char *needle){
+  const char *p = strstr(s, needle);
+  if(!p) return NULL;
+  return p + strlen(needle);
+}
+
+static int parse_int_after(const char *line, const char *key, int *out){
+  const char *p = find_after(line, key);
+  if(!p) return 0;
+  return (sscanf(p, "%d", out) == 1);
+}
+
+static int load_map_obstacles(game_state_t *g, const char *path){
+  FILE *f = fopen(path, "r");
+  if(!f){
+    perror("cannot open fiole with map");
+    return 0;
+  }
+
+  for(int i = 0; i < MAP_H; i++){
+    for(int j = 0; j < MAP_W; j++){
+      g->obstacles[i][j] = 0;
+    }
+  }
+
+  char line[256];
+  for(int i = 0; i < MAP_H; i++){
+    if(!fgets(line, sizeof(line), f)){
+      fclose(f);
+      fprintf(stderr, "map missing row %d\n", i);
+      return 0;
+    }
+    for(int j = 0; j < MAP_W; j++){
+      g->obstacles[i][j] = (line[j] == '#') ? 1 : 0;
+    }
+  }
+  fclose(f);
+
+  //validacia ohranicenia mapy
+ for(int i = 0; i < MAP_W; i++){
+    if(!g->obstacles[0][i] || !g->obstacles[MAP_H - 1][i]){
+      fprintf(stderr, "ohranicenie mapy, nemoze dat prekazku");
+      return 0;
+    }
+  }
+
+  for(int i = 0; i < MAP_H; i++){
+    if(!g->obstacles[i][0] || !g->obstacles[i][MAP_W - 1]){
+      fprintf(stderr, "ohranicenie mapy, nemoze dat prekazku");
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void clear_obstacles(game_state_t *g){
+  for(int i = 0; i < MAP_H; i++){
+    for(int j = 0; j < MAP_W; j++){
+      g->obstacles[i][j] = 0;
+    }
+  }
+}
+
 int main(void) {
     printf("SERVER started\n");
     printf("SERVER PID: %d\n", getpid());
@@ -158,7 +223,10 @@ int main(void) {
     if (ipc_create_fifos() != 0) return 1;
 
     server_ctx_t ctx;
+
     memset(&ctx, 0, sizeof(ctx));
+    ctx.game.status = GAME_OVER;
+    ctx.game.alive = 0;
     ctx.c2s_fd = -1;
     ctx.s2c_fd = -1;
     ctx.connected = 0;
@@ -168,11 +236,10 @@ int main(void) {
     ctx.paused = 0;
     ctx.resume_delay_active = 0;
     ctx.resume_at_ms = 0;
+    ctx.game_started = 0;
 
     pthread_mutex_init(&ctx.lock, NULL);
 
-    //init zatial natvrdo potom z menu
-    game_init(&ctx.game, 20, 10, MODE_TIME, WORLD_WRAP, 30000);
     //standard limit 0
     //game_init(&ctx.game, 20, 10, MODE_STANDARD, WORLD_WRAP, 0);
     //spustenie tick thread
@@ -213,6 +280,57 @@ int main(void) {
 
     //handshake
     ipc_write_line(s2c, MSG_READY);
+
+    //input pre nastavenie hry od klienta
+    char cfg[256];
+    ssize_t cn = ipc_read_line(c2s, cfg, sizeof(cfg));
+    if(cn <= 0 || !starts_with(cfg, MSG_START)){
+      fprintf(stderr, "SERVER: expected START, got: %s\n", cfg);
+      pthread_mutex_lock(&ctx.lock);
+      ctx.connected = 0;
+      ctx.last_player_left_ms = now_ms();
+      close(ctx.c2s_fd);
+      close(ctx.s2c_fd);
+      ctx.c2s_fd = -1;
+      ctx.s2c_fd = -1;
+      pthread_mutex_unlock(&ctx.lock);
+      break;
+    }
+
+    int mode = MODE_TIME;
+    int world = WORLD_WRAP;
+    int limit = 30000;
+
+    parse_int_after(cfg, "mode=", &mode);
+    parse_int_after(cfg, "world=", &world);
+    parse_int_after(cfg, "limit=", &limit);
+
+    pthread_mutex_lock(&ctx.lock);
+
+    //TIME prazdna mapa, wrap, limit zo vstupu
+    if(world == WORLD_WRAP){
+      game_init(&ctx.game, 20, 10, (game_mode_t)mode, WORLD_WRAP, limit);
+      clear_obstacles(&ctx.game);
+    }
+
+    //WALLS MAP_W x MAP_H, bez wrap, standard kym nenabura
+    else{
+      game_init(&ctx.game, MAP_W, MAP_H, MODE_STANDARD, WORLD_WALLS, 0);
+      if(!load_map_obstacles(&ctx.game, "maps/map1.txt")){
+        fprintf(stderr, "SERVER failed to load map\n");
+        ctx.game.status = GAME_OVER;
+        ctx.game.alive = 0;
+      }
+    }
+
+    ctx.paused = 0;
+    ctx.resume_delay_active = 0;
+    ctx.resume_at_ms = 0;
+    ctx.last_player_left_ms = 0;
+    ctx.shutdown = 0;
+    ctx.game_started = 1;
+
+    pthread_mutex_unlock(&ctx.lock);
 
     //game loop
     while (1) {
@@ -268,7 +386,7 @@ int main(void) {
     direction_t d;
     if(parse_direction_from_input(line, &d)){
       //DEBUG
-      fprintf(stderr, "SERVER DIR set: %d\n",(int)d);
+      //fprintf(stderr, "SERVER DIR set: %d\n",(int)d);
       //spracovanie inputov, parsovanie a volanie game_set_direction
       pthread_mutex_lock(&ctx.lock);
       game_set_direction(&ctx.game, d);
