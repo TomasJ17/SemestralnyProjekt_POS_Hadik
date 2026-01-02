@@ -57,15 +57,6 @@ static int parse_int_after(const char *line, const char *key, int *out){
   return (sscanf(p, "%d", out) == 1);
 }
 
-static int parse_size_t_after(const char *line, const char *key, size_t *out){
-  const char *p = find_after(line, key);
-  if(!p) return 0;
-  unsigned long tmp = 0;
-  if(sscanf(p, "%lu", &tmp) != 1) return 0;
-  *out = (size_t)tmp;
-  return 1;
-}
-
 static int parse_food(const char *line, int *fx, int *fy){
   const char *p = find_after(line, "food=[");
   if(!p) return 0;
@@ -142,6 +133,8 @@ static int parse_state_line_into(game_state_t *g, const char *line){
 
   const char *after = strchr(foodp, ']');
   if(!after) return 0;
+  after++;
+  while(*after == ' ') after++;
 
   return parse_snake_list(after, g);
 }
@@ -208,6 +201,37 @@ static void *render_thread(void *arg){
   return NULL;
 }
 
+static int load_map_obstacles(game_state_t *g, const char *path){
+  FILE *f = fopen(path, "r");
+  if(!f){
+    perror("cannot open file with map");
+    return 0;
+  }
+
+  //inicializacia/vynulovanie prekazok
+  for(int i = 0; i < MAP_H; i++){
+    for(int j = 0; j < MAP_W; j++){
+      g->obstacles[i][j] = 0;
+    }
+  }
+
+  char line[256];
+  for(int i = 0; i < MAP_H; i++){
+    if(!fgets(line, sizeof(line), f)){
+      fclose(f);
+      fprintf(stderr, "map missing row %d\n", i);
+      return 0;
+    }
+    for(int j = 0; j < MAP_W; j++){
+      char c = line[j];
+      if(c == '#') g->obstacles[i][j] = 1;
+      else g->obstacles[i][j] = 0;
+    }
+  }
+  fclose(f);
+  return 1;
+}
+
 int main(void) {
   printf("CLIENT started\n");
   printf("CLIENT PID: %d\n", getpid());
@@ -221,6 +245,33 @@ int main(void) {
     printf("Bye\n");
     return 0;
   }
+
+  int world = WORLD_WRAP;
+  int mode = MODE_TIME;
+  int limit_ms = 30000;
+
+  printf("Vyber si rezim:\n");
+  printf("1) TIME (prazdna mapa, WRAP)\n");
+  printf("2) WALLS (prekazky zo suboru, bez WRAP)\n");
+  int opt = 1;
+  scanf("%d", &opt);
+
+  if(opt == 1){
+    world = WORLD_WRAP;
+    mode = MODE_TIME;
+    int sec = 30;
+    printf("Zadaj casovy limit v sekundach:");
+    scanf("%d", &sec);
+    if(sec < 1) sec = 30;
+    limit_ms = sec * 1000;
+  }else{
+    world = WORLD_WALLS;
+    mode = MODE_STANDARD; // kym nenanbura
+    limit_ms = 0;
+  }
+
+  int i;
+  while((i = getchar()) != '\n' && i != EOF){}
 
   start_server_process();
   //pockaj 200ms kym server spravi fifo
@@ -251,10 +302,32 @@ int main(void) {
     return 6;
   }
 
+  char start_msg[128];
+  snprintf(start_msg, sizeof(start_msg),"%s mode=%d world=%d limit=%d",
+            MSG_START, mode, world, limit_ms
+           );
+  ipc_write_line(c2s, start_msg);
+
   client_ctx_t ctx;
   memset(&ctx, 0, sizeof(ctx));
-  ctx.last.height = 10;
-  ctx.last.width = 20;
+  if(world == WORLD_WALLS){
+    ctx.last.height = MAP_H;
+    ctx.last.width = MAP_W;
+    ctx.last.world = WORLD_WALLS;
+    ctx.last.mode = MODE_STANDARD;
+    load_map_obstacles(&ctx.last, "maps/map1.txt");
+  }else{
+    ctx.last.width = 20;
+    ctx.last.height = 10;
+    ctx.last.world = WORLD_WRAP;
+    ctx.last.mode = MODE_TIME;
+    for(int i = 0; i < MAP_H; i++){
+      for(int j = 0; j < MAP_W; j++){
+        ctx.last.obstacles[i][j] = 0;
+      }
+    }
+  }
+
   ctx.c2s_fd = c2s;
   ctx.s2c_fd = s2c;
   ctx.running = 1;
