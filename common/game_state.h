@@ -1,3 +1,8 @@
+/*
+ * Shared game state used by server and client
+ * Server periodically sends a serialized STATE line; client parses it into this struct 
+ * */
+
 #ifndef GAME_STATE_H
 #define GAME_STATE_H
 
@@ -5,13 +10,13 @@
 #include <stdint.h>
 
 typedef enum{
-  MODE_STANDARD = 0, //po 10 s bez hraca
-  MODE_TIME = 1 //po vyprsani casu
+  MODE_STANDARD = 0, //game ends after collision
+  MODE_TIME = 1 //game ends after limited time
 }game_mode_t;
 
 typedef enum{
-  WORLD_WRAP = 0, //wrap okraje(prejde a ocitne s na druhej strane)
-  WORLD_WALLS = 1 //s prekazkami plus okraje su steny
+  WORLD_WRAP = 0, //wrap borders(continue through edge and spawns on other side of map)
+  WORLD_WALLS = 1 //with obstacles in map and cannot wrap boorders, world defined by map1 in folder maps
 } world_type_t;
 
 typedef enum{
@@ -40,7 +45,7 @@ typedef struct{
   int height;
   game_mode_t mode;
   world_type_t world;
-  //pole prekazok pre WORLD_WALLS
+  //Obstacle grid for WORLD_WALLS indexing is [y][x]
   uint8_t obstacles[MAP_H][MAP_W]; //0/1
   game_status_t status;
   int alive;
@@ -50,20 +55,22 @@ typedef struct{
   point_t snake[MAX_SNAKE_LEN];
   point_t food;
 
-  //casovanie
-  int64_t start_ms; //timestamp startu
-  int32_t time_limit_ms; //limit hry, max dlzka v ms
-  int32_t elapsed_ms; //kolko casu preslo
+  //timing
+  int64_t start_ms; //timestamp of start game
+  int32_t time_limit_ms; //limit of game, max length in ms
+  int32_t elapsed_ms; //how much time elapsed in ms
 } game_state_t;
-//init hry
+//init of game
 void game_init(game_state_t *g, int width, int height, game_mode_t mode, world_type_t world, int time_limit_ms);
-//zmena smeru, nastavenie smeru
+//change and set direction from parameter
 void game_set_direction(game_state_t *g, direction_t direction);
-//reprezentuje 1 herny tik: posun, kolizie, jedlo, cas
-//dt_ms delta time v ms cas medzi jednotlivymi tikmi
-void game_tick(game_state_t *g, int dt_ms);
+//represents 1 game tick: movement, collisions, food, time
+//dt_ms delta time in ms between ticks
+//time limit handling (MODE_TIME)
+//determines one game tick when actions happen
+void game_tick(game_state_t *g, int dt_ms, int move);
 
-//pre vystup v jednom riadku
+//for oneline output about game state for client-server info
 void game_make_state_line(const game_state_t *g, char *out, size_t cap);
 
 #endif

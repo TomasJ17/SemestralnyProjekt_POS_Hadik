@@ -1,4 +1,4 @@
-#with help of artificial intelligence chatgpt
+#With help of artificial intelligence chatgpt
 CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O2 -pthread
 

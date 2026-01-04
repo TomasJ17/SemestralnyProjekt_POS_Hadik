@@ -1,3 +1,10 @@
+/*
+ * Server side game logic
+ * snake movement and collision detection
+ * food spawnig (only on free blocks avoiding snake and obstacles)
+ * time based mode
+ * */
+
 #define _POSIX_C_SOURCE 200809L
 
 #include "../common/game_state.h"
@@ -10,8 +17,8 @@
 #include <stdlib.h>
 #include <time.h>
 
-//casovanie pomocou AI chatgpt
-
+//timing with help of AI chatgpt
+//Monotonic time in ms
 static int64_t now_ms(void){
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -62,7 +69,9 @@ static point_t next_head(const game_state_t *g){
   }
   return head;
 }
-
+/*Returns 1 if the cell is outside bounds or collides with obstacles on map(WORLD_WALLS)
+ * Indexing is [y][x]
+ */
 static int is_blocked_cell(const game_state_t *g, point_t p){
   if(g->world == WORLD_WALLS){
     if(p.x < 0 || p.x >= g->width || p.y < 0 || p.y >= g->height) return 1;
@@ -70,10 +79,13 @@ static int is_blocked_cell(const game_state_t *g, point_t p){
   }
   return 0;
 }
-
+/* Spawns food randomly, but only on free(non-occupied) block cells(use of is_blocked_cell)
+ * Uses a capped number of tries (max_tries) to avoid infinite loop if map is crowded
+ * NOTE: AI assisted: loop conditions and max_tries guard were consulted with chatgpt to avoid edge-cases
+ * */
 static void spawn_food(game_state_t *g){
     point_t p;
-    //pomocka keby bola mapa plna hada
+    //helper varible ins case map is full
     int max_tries = g->width * g->height;
     //nahodny spawn na mape ale mimo hada
     do{
@@ -88,10 +100,13 @@ static void spawn_food(game_state_t *g){
     }
     g->food = p;
   }
-
+  /*
+   *Initializes a new game
+   *NOTE: memset clears obstacles too, caller can load yhem after init if needed
+   * */
   void game_init(game_state_t *g, int width, int height, game_mode_t mode, world_type_t world, int time_limit_ms){
     srand(time(NULL));
-    //premazanie game_state_t a inicializacia
+    //clear of game_state_t params and initialization
     memset(g, 0, sizeof(*g));
     g->width = width;
     g->height = height;
@@ -100,8 +115,9 @@ static void spawn_food(game_state_t *g){
     g->status = GAME_RUNNING;
     g->alive = 1;
     g->score = 0;
+    //default direction on start of game
     g->direction = DIR_UP;
-    //pociatocna dlzka hada
+    //starting snake length and set body parts into middle of map
     g->snake_len = 3;
     int sx = width/2;
     int sy = height/2;
@@ -116,7 +132,7 @@ static void spawn_food(game_state_t *g){
 
     spawn_food(g); 
   }
-
+  // helper function so player cannot turn 180 degrees and automatically collide into himself
   static int is_opposite(direction_t a, direction_t b){
     return (a == DIR_UP && b == DIR_DOWN) ||
            (a == DIR_DOWN && b == DIR_UP) ||
@@ -124,16 +140,20 @@ static void spawn_food(game_state_t *g){
            (a == DIR_LEFT && b == DIR_RIGHT);  
   }
 
-  
+  // setter: sets game_state_t.direction to direction_t from paramater given
   void game_set_direction(game_state_t *g, direction_t direction){
     if(is_opposite(g->direction, direction)) return;
     g->direction = direction;
   }
 
-  
-  void game_tick(game_state_t *g, int dt_ms){
+  //Core simulation step
+  //Handles time limit (MODE_TIME)
+  //Compute next head position(wrap or walls) using function next_head
+  //Takes care of collision, boundaries if WORLD_WRAP=0, obstacles, self
+  //Move body; grow body when food eaten; respawn food
+  void game_tick(game_state_t *g, int dt_ms, int move){
     if(g->status == GAME_OVER || !g->alive) return;
-    //ak sa hra na cas napocitavaj kazdy tick az kym neuplnynie
+    //ig game MODE_TIME count time inbetween ticks until time limit is reached, then end game
     if(g->mode == MODE_TIME){
       g->elapsed_ms += dt_ms;
       if(g->elapsed_ms >= g->time_limit_ms){
@@ -142,8 +162,11 @@ static void spawn_food(game_state_t *g){
         return;
       }
     }
+    if(!move){
+      return;
+    }
   point_t new_head = next_head(g);
-  //ci je povolene wrapovanie
+  //checks if wrapping is allowed
   if(g->world == WORLD_WRAP){
     new_head = wrap_point(g, new_head);
   }  else{
@@ -153,6 +176,7 @@ static void spawn_food(game_state_t *g){
         return;
       }
     }
+  //if wrapping is not allowed so map has walls on borders
   if(g->world == WORLD_WALLS){
     if(g->obstacles[new_head.y][new_head.x]){
       g->status = GAME_OVER;
@@ -160,38 +184,38 @@ static void spawn_food(game_state_t *g){
       return;
     }
   }
-  //ci zjedol jedlo a bude rast
+  //if ate food -> will grow
   int will_grow = points_equal(new_head, g->food);
 
   size_t check = g->snake_len;
-  //ak nerastie tak po posunuti ci po checku sa dam dostat lebo posledny segment s a posunie a na jeho miesto sa posunie hlava
+  //if doesnt grow then after move after check i can reach because last segment will move so its position can be claimed by head, if he will grow that position will be occupied so there will be collision
   if(!will_grow && g->snake_len > 0) check = g->snake_len - 1;
 
-  //narazil sam do seba
+  //collided with himself
   if(snake_contains(g, new_head, check)){
     g->status = GAME_OVER;
     g->alive = 0;
     return;
   }
-  //ak rastie zvacsi
+  //if grows increase length
   if(will_grow){
     if(g->snake_len < MAX_SNAKE_LEN){
       g->snake_len++;
     } else{
-      //dosiahol maximalnu moznu velkost, vyhra
+      //reached MAX_SNAKE_LEN, so technically won
       g->status = GAME_OVER;
       g->alive =  0;
       return;
     }
   }
   
-  //posuniutie
+  //movement
   for(size_t i = g->snake_len - 1; i > 0; --i){
     g->snake[i] = g->snake[i - 1];
   }
   g->snake[0] = new_head;
 
-  //ak zje jedlo zvysime skore
+  //score increase after food was eaten
   if(points_equal(new_head, g->food)){
     g->score++;
     spawn_food(g);
@@ -199,6 +223,9 @@ static void spawn_food(game_state_t *g){
   }
 
 void game_make_state_line(const game_state_t *g, char *out, size_t cap){
+  //cap total capacity of buffer out
+  //cannot write more then cap, because of memory overflow
+  //we are tracking used segments so append is safe
   size_t used = 0;
   int n = snprintf(out,
            cap,
@@ -214,25 +241,34 @@ void game_make_state_line(const game_state_t *g, char *out, size_t cap){
            g->food.x,
            g->food.y
            );
+  //if snprintf failed return
   if(n < 0){
+  //sends empty message
     if(cap) out[0] = '\0';
     return;
   }
   used = (size_t)n;
+  //if used >= cap there is no space for further appends, checks if head is not "too long"
+  //we ensure buffer is still null terminated and return(stop)
   if(used >= cap){
     out[cap - 1] = '\0';
     return;
   }
 
-  //append segments
+  //append segments(snake body)
+  //in loop each iteration appends "x,y" and optionally ';'
+  //so client can parse segments as a lis :"x,y;x,y;x,y"
   for(size_t i = 0; i < g->snake_len; i++){
+  //append into out+used, with remaining capacity cap - used
     n = snprintf(out + used, cap - used, "%d,%d%s",
         g->snake[i].x,
         g->snake[i].y,
         (i + 1 < g->snake_len) ? ";" : ""
       );
-    if(n < 0) break;
+    if(n < 0) break; // snprintf error, stop appending
     used += (size_t)n;
+    //if used >= cap last append got truncated and buffer end is reached
+    //truncated ensure termination and stop, check after each body segment add
     if(used >= cap){
       out[cap - 1] = '\0';
       return;
