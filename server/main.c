@@ -14,30 +14,60 @@
 #include "../ipc/ipc.h"
 #include "../common/game_protocol.h"
 #include "../common/game_state.h"
-//server context thread data type
+
+/*
+ * server/main.c
+ * -------------
+ * Snake game server process
+ * 
+ * Responsibilities:
+ *  - Create and own the named FIFOs (IPC layer) used for simple duplex protocol 
+ *  - Maintain authoritative game state (game_state_t) and advance it in a tick thread
+ *  - Accept a single client session at a time (READY -> START/JOIN -> gameplay)
+ *  - Support disconnect / join-back flow:
+ *    * DISCONNECT pauses the game and keeps server alive
+ *    * JOIN resumes the game with a short delay (anti-instant-move)
+ *  - Shutdown rules:
+ *    * QUIT sguts down game immediately
+ *    * In MODE_STANDARD, if client disconnects and no one rejoins for 10s -> shutdown
+ *    * In MODE_TIME after time limit is passed -> shutdown
+ *    * GAME_OVER also triggers shutdown
+ *
+ * Concurrency model:
+ *  - tick_thread() updates the game periodically (ctx.lock protected)
+ *  - main thread handles client connection + input messages (ctx.lock protected)
+ *
+ * AI-assisted consultation (debugging/edge cases):
+ *  - FIFO open semantics (nonblocking open + retry), poll handling, and lifecycle flags were consulted with AI during troubleshooting, final integration is author-owned
+ * */
+
+// Server context thread data type shared by tick thread and main thread 
+// All mutable fields must be accessed under ctx.lock
 typedef struct {
-  int c2s_fd;   // client->server(read)
-  int s2c_fd;   // server->client(write)
-  int connected;// if client is connected
-  int shutdown; // if server needs to be terminated
-  int game_started;
+  int c2s_fd;   // client->server(read), -1 if no session
+  int s2c_fd;   // server->client(write), -1 if no session
+  int connected;// 1 if client is connected
+  int shutdown; // 1 if server needs to be terminated
+  int game_started; // 1 after START initialized the game 
   
   pthread_mutex_t lock;
   game_state_t game;
 
-  int tick_ms;
+  int tick_ms;              // tick period in ms (determines game speed)
   int paused;               // 1 - player in menu, snake is freezed
   int resume_delay_active;  // 1 - wait 3s
   int64_t resume_at_ms;     // when snake can move again
-  int64_t last_player_left_ms;  
+  int64_t last_player_left_ms;  // used for idle shutdown timer (MODE_STANDARD)
 }server_ctx_t;
 
+// Monotonic timestamp in ms (not affected by system time changes)
 static int64_t now_ms(void){
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+// Function for setting sleep for given duration of time 
 static void ms_sleep(int ms){
   struct timespec ts;
   ts.tv_sec = ms/1000;
@@ -45,7 +75,7 @@ static void ms_sleep(int ms){
   nanosleep(&ts, NULL);
 }
 
-//tick thread, game is running even without client
+// Tick thread, game is running even without client
 static void *tick_thread(void *arg){
   server_ctx_t *ctx = (server_ctx_t *)arg;
   while(1){
@@ -63,7 +93,9 @@ static void *tick_thread(void *arg){
     }
 
     int64_t now = now_ms();
-  //10s without client ends server in MODE_STANDARD, time mode after time
+  // Idle shutdown policy:
+  // In MDODE_STANDARD 10s without client ends server(during those 10s client can reconnect(join game)) 
+  // MODE_TIME ends game after given period of time
     if(ctx->game_started && !ctx->connected && ctx->last_player_left_ms != 0){
       int64_t idle = now - ctx->last_player_left_ms;
       if(ctx->game.mode == MODE_STANDARD){
@@ -74,7 +106,9 @@ static void *tick_thread(void *arg){
         }
       }
     }
-    
+    // Movement gating:
+    //  - paused = manual pause or disconnected client (server keeps state)
+    //  - resume_delay_active = short cooldown after resume, cooldown period is kept in resume_at_ms
     int freeze =  (ctx->paused || ctx->resume_delay_active && now < ctx->resume_at_ms);
     int move = freeze ? 0 : 1;
 
@@ -98,7 +132,9 @@ static void *tick_thread(void *arg){
 
       pthread_mutex_unlock(&ctx->lock);
 
-      //send message
+    // Send message
+    // If write fails, treat it as a disconnected and drop the session 
+    // Game can keep running (depending on mode/shutdown policy)
       if(fd_to_write >= 0){
         if(ipc_write_line(fd_to_write, out) < 0){
           pthread_mutex_lock(&ctx->lock);
@@ -171,7 +207,7 @@ static int load_map_obstacles(game_state_t *g, const char *path){
   }
   fclose(f);
 
-  //map borders validation
+  // Map borders validation
  for(int i = 0; i < MAP_W; i++){
     if(!g->obstacles[0][i] || !g->obstacles[MAP_H - 1][i]){
       fprintf(stderr, "map bordering, cannot place obstacle");
@@ -185,15 +221,23 @@ static int load_map_obstacles(game_state_t *g, const char *path){
       return 0;
     }
   }
+  int cnt = 0;
+  for(int i = 0; i < MAP_H; i++){
+    for(int j = 0; j < MAP_W; j++){
+      if(g->obstacles[i][j]) cnt++;
+    }
+  }
+  g->obstacles_count = cnt;
   return 1;
 }
-
+  // Clears obstacles on map
 static void clear_obstacles(game_state_t *g){
   for(int i = 0; i < MAP_H; i++){
     for(int j = 0; j < MAP_W; j++){
       g->obstacles[i][j] = 0;
     }
   }
+  g->obstacles_count = 0;
 }
 
 int main(void) {
@@ -236,8 +280,9 @@ int main(void) {
   }
       int c2s = -1;
       int s2c = -1;
+      int quit_now = 0;
       //main thread processing of clients and messages
-
+      
       while(1){
         pthread_mutex_lock(&ctx.lock);
         int should_exit = ctx.shutdown;
@@ -253,7 +298,12 @@ int main(void) {
           pthread_mutex_unlock(&ctx.lock);
           if(should_exit2) break;
           
-
+        /*
+         * Connection handshake without deadlocks:
+         *  - FIFO open() can block depending on whether the peer already opened the other end
+         *  - Use O_NONBLOCK + retry to probe availibility safely
+         *  - Once both ends are opened, switch to blocking mode for normal ipc_read_line
+         * */
           if(c2s < 0){
             c2s = open(FIFO_C2S, O_RDONLY | O_NONBLOCK);
             if(c2s < 0){
@@ -297,15 +347,15 @@ int main(void) {
     
     char line[256];
 
-    //handshake
+    // Handshake: server announces readiness, then waits for START (new game) or JOIN (resume)
     ipc_write_line(s2c, MSG_READY);
 
-    //input for game setup from client
+    // Input for game setup from client
     char cfg[256];
     ssize_t cn = ipc_read_line(c2s, cfg, sizeof(cfg));
     if(cn <= 0){
       //fprintf(stderr, "SERVER: expected START, got: %s\n", (cn > 0) ? cfg : "<EOF>");
-      //Client didnt start game correctly, close session and wait for next client
+      // Client didnt start game correctly, close session and wait for next client
       pthread_mutex_lock(&ctx.lock);
       ctx.connected = 0;
       ctx.last_player_left_ms = now_ms();
@@ -322,7 +372,8 @@ int main(void) {
       ms_sleep(50);
       continue;
     }
-    //JOIN existing game
+    // JOIN existing game: allow client to attach only if a game is currently running and alive
+    // On success we resume with a short delay(3s) to avoid immediate movement on connect
     if(strcmp(cfg, MSG_JOIN) == 0){
       int can_join = 0;
 
@@ -347,7 +398,7 @@ int main(void) {
         pthread_mutex_unlock(&ctx.lock);
         continue;
       }
-      //join OK resume with 3s delay
+      // JOIN OK resume with 3s delay
       pthread_mutex_lock(&ctx.lock);
       ctx.paused = 0;
       ctx.resume_delay_active = 1;
@@ -355,7 +406,9 @@ int main(void) {
       ctx.last_player_left_ms = 0;
       pthread_mutex_unlock(&ctx.lock);
     }
-    // START - new game setup
+    // START - new game setup: initialize a new game instance
+    // Parameters are sent as key=value fields (mode/world/limit/w/h)
+    // WORLD_WALLS uses fixed MAP_W x MAP_H and loads obstacles from maps/map1.txt
     else if(starts_with(cfg, MSG_START)){
       int mode = MODE_TIME;
       int world = WORLD_WRAP;
@@ -387,7 +440,6 @@ int main(void) {
     ctx.resume_delay_active = 0;
     ctx.resume_at_ms = 0;
     ctx.last_player_left_ms = 0;
-    ctx.shutdown = 0;
     ctx.game_started = 1;
 
     pthread_mutex_unlock(&ctx.lock);
@@ -408,7 +460,7 @@ int main(void) {
 
       continue;
     }
-    //game loop
+    // Game loop
     while (1) {
       pthread_mutex_lock(&ctx.lock);
       int should_exit3 = ctx.shutdown;
@@ -417,6 +469,22 @@ int main(void) {
         if(s2c >= 0) ipc_write_line(s2c, MSG_BYE);
         break;
       }
+      /*
+       * poll() is used to wait for client input without blocking the whole server loop
+       * We poll the client->server FIFO (c2s) for readability
+       *
+       * AI-assisted consultation: poll()/FIFO disconnect esge-cases (POLLHUP/POLLERR)
+       * retry logic and shutdown behaviour were discussed during debugging
+       *
+       * pfd.events:
+       *  - POLLIN : there is data available to read (ipc_read_line will not block)
+       *
+       *  poll() return value:
+       *   - >0 : at least one fd has an event set in revents
+       *   -  0 : timeout (no input) -> loop continues (tick_thread still runs)
+       *   - <0 : error (EINTR means interrupted by signal -> retry)
+       *
+       * */
       struct pollfd pfd;
       pfd.fd = c2s;
       pfd.events = POLLIN;
@@ -431,9 +499,17 @@ int main(void) {
       if(pr == 0){
         continue;
       }
-
+      
+      /*
+       * pfd.revents is filled by poll() and describes what happened on the fd:
+       *  - POLLIN  : fd is readable
+       *  - POLLHUP : peer closed its end (hang-up) -> FIFO got disconnected
+       *  - POLLERR : I/O error on fd
+       *
+       *  AI-assisted consultation: clarified correct handling of HUP/ERR vs EOF on FIFOs
+       * */
       if(pfd.revents & (POLLHUP | POLLERR)){
-          //end of client alebo EOF
+          // End of client or EOF
           pthread_mutex_lock(&ctx.lock);
           ctx.connected = 0;
           ctx.last_player_left_ms = now_ms();
@@ -452,7 +528,7 @@ int main(void) {
       if(pfd.revents & POLLIN){
         ssize_t n = ipc_read_line(c2s, line, sizeof(line));
         if(n <= 0){
-          //end of client alebo EOF
+          // End of client alebo EOF
           pthread_mutex_lock(&ctx.lock);
           ctx.connected = 0;
           ctx.last_player_left_ms = now_ms();
@@ -468,20 +544,37 @@ int main(void) {
           break;
         }
       
-
       //DEBUG
       fprintf(stderr, "server rx: %s\n", line);
-
+      // QUIT: terminate server regardless of mode
       if(strcmp(line, MSG_QUIT) == 0){
-        //finish game and server
+        // Finish game and server
+        // Tell client we are closing game
+        if(s2c >= 0) ipc_write_line(s2c, MSG_BYE);
         pthread_mutex_lock(&ctx.lock);
+        // Mark game as not joinable anymore
         ctx.shutdown = 1;
+        ctx.game_started = 0;
+        ctx.game.status = GAME_OVER;
+        ctx.game.alive = 0;
+        ctx.connected = 0;
+        ctx.last_player_left_ms = now_ms();
+        // Close session endpoints immediately (prevents reconnecting)
+        if(ctx.c2s_fd >= 0){
+          close(ctx.c2s_fd);
+          ctx.c2s_fd = -1;
+        }
+        if(ctx.s2c_fd >= 0){
+          close(ctx.s2c_fd);
+          ctx.s2c_fd = -1;
+        }
         pthread_mutex_unlock(&ctx.lock);
-        ipc_write_line(s2c, MSG_BYE);
+        quit_now = 1;
         break;
       }
+      // DISCONNECT: drop clients session, pause game, keep server alive for possible JOIN
       if(strcmp(line, MSG_DISCONNECT) == 0){
-        //client leaves but server is running
+        // Client leaves but server is running
         pthread_mutex_lock(&ctx.lock);
         ctx.connected = 0;
         ctx.paused = 1; 
@@ -497,6 +590,7 @@ int main(void) {
         pthread_mutex_unlock(&ctx.lock);
         break;
       }
+      // PAUSE toggles frozen state, unpause activates a short resume delay
       if(strcmp(line, MSG_PAUSE) == 0){
         pthread_mutex_lock(&ctx.lock);
         if(!ctx.paused){
@@ -512,20 +606,43 @@ int main(void) {
       }
       direction_t d;
       if(parse_direction_from_input(line, &d)){
-        //DEBUG
-        //fprintf(stderr, "SERVER DIR set: %d\n",(int)d);
-        //processing of inputs, parsing and calling game_set_direction
+        // DEBUG
+        // fprintf(stderr, "SERVER DIR set: %d\n",(int)d);
+        // Processing of inputs, parsing and calling game_set_direction
         pthread_mutex_lock(&ctx.lock);
         game_set_direction(&ctx.game, d);
         pthread_mutex_unlock(&ctx.lock);
         }
       }
+      if(quit_now){
+        goto shutdown_server;
+      }
       }
     }
-    //threads waiting
-    pthread_join(t_thread, NULL);
+    shutdown_server:
+      // ensure shutdown flag is set 
+      pthread_mutex_lock(&ctx.lock);
+      ctx.shutdown = 1;
+      pthread_mutex_unlock(&ctx.lock);
 
-    ipc_cleanup_fifos();
-    printf("SERVER end\n");
-    return 0;
+      // Threads waiting
+      pthread_join(t_thread, NULL);
+      
+      //close any remaining session fds
+      pthread_mutex_lock(&ctx.lock);
+      if(ctx.c2s_fd >= 0){
+        close(ctx.c2s_fd);
+        ctx.c2s_fd = -1;
+      }
+      if(ctx.s2c_fd >= 0){
+        close(ctx.s2c_fd);
+        ctx.s2c_fd = -1;
+      }
+      pthread_mutex_unlock(&ctx.lock);
+
+      pthread_mutex_destroy(&ctx.lock);
+
+      ipc_cleanup_fifos();
+      printf("SERVER end\n");
+      return 0;
 }

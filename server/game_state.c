@@ -85,9 +85,18 @@ static int is_blocked_cell(const game_state_t *g, point_t p){
  * */
 static void spawn_food(game_state_t *g){
     point_t p;
+    int obstacles = (g->world == WORLD_WALLS) ? g->obstacles_count : 0;
+    int free_cells = g->width * g->height - obstacles;
+
+    if((int)g->snake_len >= free_cells){
+      g->status = GAME_OVER;
+      g->alive = 0;
+      return;
+    }  
+
     //helper varible ins case map is full
     int max_tries = g->width * g->height;
-    //nahodny spawn na mape ale mimo hada
+    //random spawn on map but avoiding snake body
     do{
       p.x = rand() % g->width;
       p.y = rand() % g->height;
@@ -199,7 +208,9 @@ static void spawn_food(game_state_t *g){
   }
   //if grows increase length
   if(will_grow){
-    if(g->snake_len < MAX_SNAKE_LEN){
+    int obstacles = (g->world == WORLD_WALLS) ? g->obstacles_count : 0;
+    int free_cells = g->width * g->height - obstacles;
+    if((int)g->snake_len < free_cells && g->snake_len < MAX_SNAKE_LEN){
       g->snake_len++;
     } else{
       //reached MAX_SNAKE_LEN, so technically won

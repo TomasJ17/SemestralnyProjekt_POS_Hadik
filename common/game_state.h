@@ -47,6 +47,7 @@ typedef struct{
   world_type_t world;
   //Obstacle grid for WORLD_WALLS indexing is [y][x]
   uint8_t obstacles[MAP_H][MAP_W]; //0/1
+  int obstacles_count;
   game_status_t status;
   int alive;
   int score;
