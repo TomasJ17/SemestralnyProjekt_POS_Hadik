@@ -184,7 +184,7 @@ static int parse_int_after(const char *line, const char *key, int *out){
 static int load_map_obstacles(game_state_t *g, const char *path){
   FILE *f = fopen(path, "r");
   if(!f){
-    perror("cannot open fiole with map");
+    perror("cannot open file with map");
     return 0;
   }
 
@@ -238,6 +238,19 @@ static void clear_obstacles(game_state_t *g){
     }
   }
   g->obstacles_count = 0;
+}
+
+static int parse_str_after(const char *line, const char *key, char *out, size_t out_sz){
+  const char *p = find_after(line, key);
+  if(!p) return 0;
+
+  size_t i = 0;
+  while(p[i] && p[i] != ' ' && i + 1 < out_sz){
+    out[i] = p[i];
+    i++;
+  }
+  out[i] = '\0';
+  return i > 0;
 }
 
 int main(void) {
@@ -415,12 +428,14 @@ int main(void) {
       int limit = 30000;
       int w = 20;
       int h = 10; 
+      char map_path[128] = "maps/map1.txt";
 
       parse_int_after(cfg, "mode=", &mode);
       parse_int_after(cfg, "world=", &world);
       parse_int_after(cfg, "limit=", &limit);
       parse_int_after(cfg, "w=", &w);
       parse_int_after(cfg, "h=", &h);
+      parse_str_after(cfg, "map=", map_path, sizeof(map_path));
 
       pthread_mutex_lock(&ctx.lock);
       
@@ -431,7 +446,7 @@ int main(void) {
         clear_obstacles(&ctx.game);
       }else{
         game_init(&ctx.game, MAP_W, MAP_H, (game_mode_t)mode, WORLD_WALLS, limit);
-        if(!load_map_obstacles(&ctx.game, "maps/map1.txt")){
+        if(!load_map_obstacles(&ctx.game, map_path)){
           fprintf(stderr, "SERVER failed to load map\n");
           ctx.game.status = GAME_OVER;
           ctx.game.alive = 0;

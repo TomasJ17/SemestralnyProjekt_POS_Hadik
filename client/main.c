@@ -56,6 +56,7 @@ typedef struct{
   int running;            // global stop flag for threads
 
   int walls_map_loaded;   // local helper: map file loaded (WORLD_WALLS rendering)
+  char walls_map_path[128]; // file path to map
 } client_ctx_t;
 
 /*
@@ -319,7 +320,7 @@ static void *rx_thread(void *arg){
           ctx->last.mode = (ctx->last.time_limit_ms > 0) ? MODE_TIME : MODE_STANDARD;
           // Load map obstacles once to avoid re-reading the file each tick
           if(!ctx->walls_map_loaded){
-            if(!load_map_obstacles(&ctx->last, "maps/map1.txt")){
+            if(!load_map_obstacles(&ctx->last, ctx->walls_map_path)){
               // On failure, fall back to empty obstacle
               for(int i = 0; i < MAP_H; i++){
                 for(int j = 0; j < MAP_W; j++){
@@ -526,6 +527,8 @@ static int connect_with_retry(int *out_c2s, int *out_s2c){
  *  - Later we use poll() + fgets() for interactive controls during gameplay
  * */
 int main(void) {
+  //default map path
+  char map_path[128] = "maps/map1.txt";
   printf("CLIENT started\n");
   printf("CLIENT PID: %d\n", getpid());
   atexit(term_restore);
@@ -632,6 +635,15 @@ while(1){
       //WALLS fixed size
       w = MAP_W;
       h = MAP_H;
+      printf("Zadaj cestu k mape (default maps/map1.txt): ");
+      char tmp[128];
+      if(fgets(tmp, sizeof(tmp), stdin)){
+        tmp[strcspn(tmp, "\n")] = 0;
+        if(tmp[0] != '\0'){
+          strncpy(map_path, tmp, sizeof(map_path)-1);
+            map_path[sizeof(map_path)-1] = '\0';
+        }
+      }
     }
 
 
@@ -673,8 +685,8 @@ while(1){
         snprintf(start_msg, sizeof(start_msg),"%s mode=%d world=%d limit=%d w=%d h=%d",
             MSG_START, mode, world, limit_ms, w, h);
     } else {
-      snprintf(start_msg, sizeof(start_msg), "%s mode=%d world=%d limit=%d",
-               MSG_START, mode, world, limit_ms);
+      snprintf(start_msg, sizeof(start_msg), "%s mode=%d world=%d limit=%d map=%s",
+               MSG_START, mode, world, limit_ms, map_path);
       }
       ipc_write_line(c2s, start_msg);
     }
@@ -687,7 +699,10 @@ while(1){
     ctx.last.width = MAP_W;
     ctx.last.world = WORLD_WALLS;
     ctx.last.mode = mode;
-    load_map_obstacles(&ctx.last, "maps/map1.txt");
+    strncpy(ctx.walls_map_path, map_path, sizeof(ctx.walls_map_path)-1);
+    ctx.walls_map_path[sizeof(ctx.walls_map_path)-1] = '\0';
+    load_map_obstacles(&ctx.last, ctx.walls_map_path);
+    ctx.walls_map_loaded = 1;
   }else{
     ctx.last.width = w;
     ctx.last.height = h;

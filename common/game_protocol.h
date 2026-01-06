@@ -46,7 +46,7 @@
 static inline int starts_with(const char *s, const char *prefix){
   if(!s || !prefix) return 0;
   size_t n = strlen(prefix);
-  return strncmp(s, prefix, n) == 0 && (s[n] == '\n' || s[n] == ' ');
+  return strncmp(s, prefix, n) == 0 && (s[n] == '\0' || s[n] == '\n' || s[n] == ' ');
 }
 /* Convenience helper for validating movement input lines */
 static inline int is_input_line(const char *line){
