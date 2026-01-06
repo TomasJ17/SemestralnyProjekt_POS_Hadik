@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/poll.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -315,7 +316,7 @@ static void *rx_thread(void *arg){
         int is_walls = (ctx->last.width == MAP_W && ctx->last.height == MAP_H);
         if(is_walls){
           ctx->last.world = WORLD_WALLS;
-          ctx->last.mode = MODE_STANDARD;
+          ctx->last.mode = (ctx->last.time_limit_ms > 0) ? MODE_TIME : MODE_STANDARD;
           // Load map obstacles once to avoid re-reading the file each tick
           if(!ctx->walls_map_loaded){
             if(!load_map_obstacles(&ctx->last, "maps/map1.txt")){
@@ -330,6 +331,8 @@ static void *rx_thread(void *arg){
           }
         }else{
           // WORLD_WRAP: ensure obstacles are cleared (renderer expects empty obstacle)
+          ctx->last.world = WORLD_WRAP;
+          ctx->last.mode = (ctx->last.time_limit_ms > 0) ? MODE_TIME : MODE_STANDARD;
           for(int i = 0; i < MAP_H; i++){
             for(int j = 0; j < MAP_W; j++){
               ctx->last.obstacles[i][j] = 0;
@@ -435,9 +438,25 @@ static void stop_existing_server(void){
 
   // Handshake: server sends READY after connection and waits for START
   char line[256];
-  ssize_t n = ipc_read_line(s2c, line, sizeof(line));
-  if(n > 0 && strcmp(line, MSG_READY) == 0){
+  int got_ready = 0;
+  for(int i=0; i < 40; i++){
+    struct pollfd pfd = {.fd = s2c, .events = POLLIN, .revents = 0};
+    int pr = poll(&pfd, 1, 50);
+    if(pr < 0){
+      if(errno == EINTR) continue;
+      break;
+    }
+    if(pr == 0) continue;
+    ssize_t n = ipc_read_line(s2c, line, sizeof(line));
+    if(n <= 0) continue;
+    if(strcmp(line, MSG_READY) == 0){
+      got_ready = 1;
+      break;
+    }
+    if(starts_with(line, MSG_STATE)) continue;
+  }
     // Send a minimal START to satisfy the server logic, then QUIT immediatly 
+  if(got_ready){
     char start_msg[128];
     snprintf(start_msg, sizeof(start_msg), 
               "%s mode=%d world=%d limit=%d",
@@ -517,12 +536,12 @@ int main(void) {
   int c;
   while((c = getchar()) != '\n' && c != EOF) {}
   if(choice != 1){
-    stop_existing_server();
+    //stop_existing_server();
     printf("Bye\n");
     return 0;
   }
 while(1){
-  printf("Server:\n1) New server (new game)\n2) Join existing game\n3) Exit\n");
+  printf("Server:\n1) New server (new game)\n2) Join existing game\n3) Exit\n4) Force kill server process(admin)\n");
   int serv_opt = 1;
   scanf("%d", &serv_opt);
   // Drain newline
@@ -531,8 +550,13 @@ while(1){
 
   int c2s = -1;
   int s2c = -1;
-  if(serv_opt == 3){
+  if(serv_opt == 4){
     stop_existing_server();
+    printf("Force kill done (if server was running)\n");
+    continue;
+  }
+  if(serv_opt == 3){
+    //stop_existing_server();
     break;  
   }
   // Default configuration values
@@ -542,64 +566,83 @@ while(1){
   int w = 20, h = 10;
 
   if(serv_opt == 1){
-    printf("Vyber si rezim:\n");
-    printf("1) TIME (prazdna mapa, WRAP)\n");
+      // WORLD slection
+    int world_choice = 0;
+    printf("Vyber si svet:\n");
+    printf("1) WRAP (prazdna mapa, WRAP)\n");
     printf("2) WALLS (prekazky zo suboru, bez WRAP)\n");
     printf("3) EXIT\n");
-    int opt = 1;
-    scanf("%d", &opt);
+
+    scanf("%d", &world_choice);
     // Drain newline
     int cr;
     while((cr = getchar()) != '\n' && cr != EOF) {};
-    if(opt == 3){
+    if(world_choice == 3){
       continue;
     }
-
-    if(opt == 1){
-      world = WORLD_WRAP;
-      mode = MODE_TIME;
-
+    if(world_choice == 1) world = WORLD_WRAP;
+    else if(world_choice == 2) world = WORLD_WALLS;
+    else {
+      printf("Zla volba\n");
+      continue;
+    }
+      // MODE selection
+    int mode_choice = 0;
+    printf("Vyber si rezim:\n");
+    printf("1) TIME (hra skonci po vyprsani casu)\n");
+    printf("2) STANDARD (hra skonci po 10s idle bez hraca)\n");
+    printf("3) EXIT\n");
+    scanf("%d", &mode_choice);
+    int dr;
+    while((dr = getchar()) != '\n' && dr != EOF) {}
+    if(mode_choice == 3) continue;
+    if(mode_choice == 1) mode = MODE_TIME;
+    else if(mode_choice == 2) mode = MODE_STANDARD;
+    else{
+      printf("Zla volba\n");
+      continue;
+    }
+    if(mode == MODE_TIME){
       int sec = 30;
-      printf("Zadaj casovy limit v sekundach (0 = spat):");
+      printf("Zadaj casovy limit v sekundach (0 = spat): ");
       scanf("%d", &sec);
-      // Drain newline
       int aa;
-      while((aa = getchar()) != '\n' && aa != EOF) {};
-
-      if(sec == 0){
-        continue;
-      }
-
+      while((aa = getchar()) != '\n' && aa != EOF) {}
+      if(sec == 0) continue;
       if(sec < 1) sec = 30;
       limit_ms = sec * 1000;
-      printf("Zadaj sirku sveta (10 - 80):");
+    }else{
+      limit_ms = 0; // STANDARD
+    }
+    if(world == WORLD_WRAP){
+      printf("Zadaj sirku sveta (10-80): ");
       scanf("%d", &w);
       int bb;
-      while((bb = getchar()) != '\n' && bb != EOF) {};
+      while((bb = getchar()) != '\n' && bb != EOF) {}
 
-          
-      printf("Zadaj vysku sveta (10 - 40):");
+      printf("Zadaj vysku sveta (10-40): ");
       scanf("%d", &h);
       int cc;
-      while((cc = getchar()) != '\n' && cc != EOF) {};
-      
-      // Clamp user input to safe ranges 
+      while((cc = getchar()) != '\n' && cc != EOF) {}
       if(w < 10) w = 10;
       if(w > 80) w = 80;
       if(h < 10) h = 10;
       if(h > 40) h = 40;
-
     }else{
-      // WORLD_WALLS uses fixed map size and standard (no time limit)
-      world = WORLD_WALLS;
-      mode = MODE_STANDARD; // until collision
-      limit_ms = 0;
+      //WALLS fixed size
       w = MAP_W;
       h = MAP_H;
-  }
+    }
+
 
   // Enforce "single player": stop old one, then start a fresh one
-  stop_existing_server();
+  //stop_existing_server();
+
+  //
+  if(server_is_running()){
+    printf("Server bezi. Nemozes spustit dalsi server. Pouzi JOIN alebo pockaj kym server dobehne");
+    continue;
+  }
   start_server_process();
   ms_sleep(200); //to create FIFO in time
 }
@@ -643,13 +686,13 @@ while(1){
     ctx.last.height = MAP_H;
     ctx.last.width = MAP_W;
     ctx.last.world = WORLD_WALLS;
-    ctx.last.mode = MODE_STANDARD;
+    ctx.last.mode = mode;
     load_map_obstacles(&ctx.last, "maps/map1.txt");
   }else{
     ctx.last.width = w;
     ctx.last.height = h;
     ctx.last.world = WORLD_WRAP;
-    ctx.last.mode = MODE_TIME;
+    ctx.last.mode = mode;
     for(int i = 0; i < MAP_H; i++){
       for(int j = 0; j < MAP_W; j++){
         ctx.last.obstacles[i][j] = 0;
@@ -698,6 +741,7 @@ while(1){
 
   printf("Controls: w/a/s/d, p = pause/resume ,x = disconnect,q = quit\n");
 
+  int exit_client = 0;
   /*
    * Gameplay input loop:
    *  - Uses poll(STDIN) with a timeout to avoid blocking forever
@@ -738,7 +782,11 @@ while(1){
     }
 
     if(strcmp(cmd, "q") == 0){
-      ipc_write_line(c2s, MSG_QUIT);
+      //FIX
+      //ipc_write_line(c2s, MSG_QUIT);
+      // q - quits client, server just disconnected/paused
+      ipc_write_line(c2s, MSG_DISCONNECT);
+      exit_client = 1;
       break;
     }
 
@@ -766,6 +814,7 @@ while(1){
   pthread_join(t, NULL);
   pthread_join(tr, NULL);
   pthread_mutex_destroy(&ctx.lock);
+  if(exit_client) return 0;
   term_restore();
   // Clear screen and move cursor home for clean menu redraw
   printf("\033[2J\033[H");

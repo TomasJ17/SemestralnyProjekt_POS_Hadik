@@ -423,12 +423,14 @@ int main(void) {
       parse_int_after(cfg, "h=", &h);
 
       pthread_mutex_lock(&ctx.lock);
+      
+      if(mode == MODE_STANDARD) limit = 0;
 
       if(world == WORLD_WRAP){
         game_init(&ctx.game, w, h, (game_mode_t)mode, WORLD_WRAP, limit);
         clear_obstacles(&ctx.game);
       }else{
-        game_init(&ctx.game, MAP_W, MAP_H, MODE_STANDARD, WORLD_WALLS, 0);
+        game_init(&ctx.game, MAP_W, MAP_H, (game_mode_t)mode, WORLD_WALLS, limit);
         if(!load_map_obstacles(&ctx.game, "maps/map1.txt")){
           fprintf(stderr, "SERVER failed to load map\n");
           ctx.game.status = GAME_OVER;
@@ -512,6 +514,7 @@ int main(void) {
           // End of client or EOF
           pthread_mutex_lock(&ctx.lock);
           ctx.connected = 0;
+          ctx.paused = 1;
           ctx.last_player_left_ms = now_ms();
           if(ctx.c2s_fd >= 0){
             close(ctx.c2s_fd);
@@ -530,6 +533,7 @@ int main(void) {
         if(n <= 0){
           // End of client alebo EOF
           pthread_mutex_lock(&ctx.lock);
+          ctx.paused = 1;
           ctx.connected = 0;
           ctx.last_player_left_ms = now_ms();
           if(ctx.c2s_fd >= 0){
